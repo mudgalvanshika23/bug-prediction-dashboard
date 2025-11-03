@@ -1,4 +1,6 @@
-# app.py
+# app.py — Final Version for Bug Prediction Dashboard
+# Fully compatible with Streamlit Cloud & local runs
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,151 +10,167 @@ from io import BytesIO
 
 st.set_page_config(page_title="Bug Prediction Dashboard", layout="wide")
 
-# --- Helper functions ---
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
 def load_artifact(path):
+    """Safely load model/preprocessor file or show Streamlit error."""
     if not os.path.exists(path):
-        st.error(f"Missing file: {path} — please place it in the app folder.")
+        st.error(f"Missing file: {path} — please ensure it exists in the app folder.")
         st.stop()
     return joblib.load(path)
 
 def preprocess_input(df, imputer, scaler, expected_n_features=None):
-    # Keep numeric columns only (coerce)
+    """Impute missing values and scale features."""
     X = df.copy()
+
+    # Convert all columns to numeric
     for c in X.columns:
         X[c] = pd.to_numeric(X[c], errors='coerce')
 
-    # If we have fewer/extra cols than expected, handle
-    if expected_n_features is not None and X.shape[1] != expected_n_features:
-        st.warning(
-            f"Uploaded data has {X.shape[1]} features but the model expects {expected_n_features}. "
-            "If column order differs from training, provide columns in the same order or provide a file named 'feature_order.txt'."
-        )
-        # Try feature_order.txt to reorder
-        if os.path.exists("feature_order.txt"):
-            with open("feature_order.txt", "r") as fh:
-                order = [l.strip() for l in fh.readlines() if l.strip()]
-            # keep only the features that are present in both (and in the correct order)
-            matched = [c for c in order if c in X.columns]
-            if len(matched) == expected_n_features:
-                X = X[matched]
-                st.info("Reordered input using feature_order.txt")
-            else:
-                st.error("feature_order.txt doesn't match uploaded file columns. Unable to proceed.")
-                st.stop()
-        else:
-            st.error("Feature count mismatch and no feature_order.txt found. Please upload correct file.")
-            st.stop()
-
-    # Imputation and scaling
+    # Impute & scale
     X_imp = imputer.transform(X)
     X_scaled = scaler.transform(X_imp)
     return X_scaled, X
 
-# --- Load models and preprocessors ---
-st.sidebar.title("Model artifacts")
-st.sidebar.write("Ensure these files are in the app folder:")
-st.sidebar.write("- bug_predict_rf_tuned.joblib (required)")
-st.sidebar.write("- imputer.joblib (required)")
-st.sidebar.write("- scaler.joblib (required)")
-st.sidebar.write("- (optional) feature_order.txt to map input columns")
+# -------------------------------
+# Load Artifacts
+# -------------------------------
+st.sidebar.title("Model Artifacts")
+st.sidebar.write("Ensure these files exist:")
+st.sidebar.write("- bug_predict_rf_tuned.joblib")
+st.sidebar.write("- imputer.joblib")
+st.sidebar.write("- scaler.joblib")
+st.sidebar.write("- (optional) feature_order.txt")
 
 try:
     model = load_artifact("bug_predict_rf_tuned.joblib")
     imputer = load_artifact("imputer.joblib")
     scaler = load_artifact("scaler.joblib")
 except Exception as e:
+    st.error(f"Error loading model artifacts: {e}")
     st.stop()
 
-# expected feature count (if available from scaler)
-expected_n_features = None
+# Determine expected feature count
 try:
     expected_n_features = getattr(scaler, "n_features_in_", None)
 except Exception:
     expected_n_features = None
 
-# App title and description
+# -------------------------------
+# Streamlit UI
+# -------------------------------
 st.title("Software Defect Prediction Dashboard")
 st.markdown(
     """
-    Upload a CSV file containing software metrics (same columns used during training).
-    The dashboard will preprocess the data using the saved imputer/scaler, predict defect probability
-    using the tuned Random Forest model, and present results and visualizations.
+    Upload a CSV file containing software metrics (same format as used in training).
+    The dashboard preprocesses data, applies the trained Random Forest model,
+    and displays predictions, defect probabilities, and summary insights.
     """
 )
 
-# File uploader
 uploaded_file = st.file_uploader("Upload software metrics CSV file", type=["csv"])
 
-# Sample file download / example
+# Optional sample dataset section
 with st.expander("Sample dataset and guidance"):
-    st.write("Use a JM1-like CSV with numeric columns and a consistent column order.")
-    if st.button("Download sample jm1.csv (provided)"):
-        if os.path.exists("jm1.csv"):
-            with open("jm1.csv", "rb") as fh:
-                st.download_button("Download sample jm1.csv", fh, file_name="jm1_sample.csv")
-        else:
-            st.info("No jm1.csv found in the folder.")
+    st.write("Ensure your CSV uses the same features and order as used during training.")
+    if os.path.exists("jm1.csv"):
+        with open("jm1.csv", "rb") as fh:
+            st.download_button("Download sample jm1.csv", fh, file_name="jm1_sample.csv")
+    else:
+        st.info("No jm1.csv found locally — upload your own dataset.")
 
-# Run prediction pipeline if file uploaded
+# -------------------------------
+# Process Uploaded File
+# -------------------------------
 if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file)
     except Exception as e:
-        st.error("Unable to read CSV. Please ensure it's comma-separated and well-formed.")
+        st.error("Unable to read CSV file. Please upload a valid comma-separated file.")
         st.stop()
 
-    st.subheader("Uploaded data preview")
+    st.subheader("Uploaded Data Preview")
     st.dataframe(df.head())
 
-    # Basic checks
-    if df.shape[0] == 0:
-        st.error("Uploaded file contains no rows.")
-        st.stop()
+    # --- FIX: Drop unwanted columns ---
+    if 'defect' in df.columns:
+        st.warning("Uploaded file contained 'defect' column — dropping it for prediction.")
+        df = df.drop(columns=['defect'])
 
-    # Preprocess
-    X_scaled, X_original = preprocess_input(df, imputer, scaler, expected_n_features=expected_n_features)
+    unnamed_cols = [c for c in df.columns if 'unnamed' in c.lower()]
+    if unnamed_cols:
+        st.info(f"Dropping unnamed columns: {unnamed_cols}")
+        df = df.drop(columns=unnamed_cols)
 
-    # Predictions
+    # --- Handle column order (feature_order.txt) ---
+    expected = None
+    if os.path.exists("feature_order.txt"):
+        with open("feature_order.txt") as fh:
+            expected = [l.strip() for l in fh if l.strip()]
+
+    if expected:
+        missing = [c for c in expected if c not in df.columns]
+        if missing:
+            st.error(f"Uploaded file is missing expected columns: {missing}")
+            st.stop()
+        df = df[expected]
+    else:
+        if expected_n_features and df.shape[1] != expected_n_features:
+            st.error(
+                f"Uploaded data has {df.shape[1]} features but the model expects {expected_n_features}. "
+                "Please ensure the same features are used or provide a feature_order.txt file."
+            )
+            st.stop()
+
+    # --- Preprocess data ---
+    X_scaled, X_original = preprocess_input(df, imputer, scaler)
+
+    # --- Run predictions ---
     preds = model.predict(X_scaled)
     try:
         probs = model.predict_proba(X_scaled)[:, 1]
     except Exception:
-        # If model doesn't support predict_proba fallback to confidences
-        probs = model.predict_proba(X_scaled)[:, 1] if hasattr(model, "predict_proba") else np.zeros(len(preds))
+        probs = np.zeros(len(preds))
 
-    # Prepare results DF
+    # --- Display results ---
     results = X_original.copy()
     results["Predicted_Defect"] = preds
     results["Defect_Probability"] = np.round(probs, 4)
 
-    st.subheader("Prediction results (first 20 rows)")
+    st.subheader("Prediction Results (First 20 Rows)")
     st.dataframe(results.head(20))
 
-    # Download results (CSV)
     csv = results.to_csv(index=False).encode("utf-8")
     st.download_button("Download predictions (CSV)", data=csv, file_name="predictions.csv", mime="text/csv")
 
-    # Summary metrics
+    # --- Summary ---
     st.subheader("Summary")
     defect_rate = results["Predicted_Defect"].mean() * 100
     st.metric("Predicted Defect Rate", f"{defect_rate:.2f}%")
 
-    # Counts and chart
     counts = results["Predicted_Defect"].value_counts().sort_index()
-    st.write("Predicted class counts (0 = non-defective, 1 = defective)")
     st.bar_chart(counts)
 
-    # Show top-k risky modules
-    st.subheader("Top predicted defect probabilities")
+    st.subheader("Top Predicted Defects (High Risk Modules)")
     topk = results.sort_values("Defect_Probability", ascending=False).head(10)
     st.dataframe(topk)
 
-    # Optional: show feature influence placeholder
-    st.info("If SHAP outputs are available offline, you can integrate them here for explainability.")
+    st.info("If SHAP plots are available, they can be integrated here for explainability.")
 
 else:
-    st.info("Upload a software metrics CSV to begin prediction.")
+    st.info("Awaiting CSV upload... Please upload your dataset to begin.")
 
+# -------------------------------
 # Footer
+# -------------------------------
 st.markdown("---")
-st.markdown("**Notes:**\n- The uploaded CSV must use the same features (and ideally the same order) as used during training.\n- If your column order differs, add a file named `feature_order.txt` with one feature name per line representing the training order.\n- For deployment to Streamlit sharing or other hosting, include all `.joblib` files and this `app.py` in a GitHub repo.")
+st.markdown(
+    """
+    **Notes:**
+    - The uploaded CSV must use the same features (and ideally order) as used during training.  
+    - If column order differs, add a file named `feature_order.txt` with one feature per line (training order).  
+    - For deployment or sharing, include this `app.py` and all `.joblib` files in your GitHub repo.  
+    """
+)

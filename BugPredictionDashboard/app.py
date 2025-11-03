@@ -1,5 +1,5 @@
-# app.py — Final Version (Prediction + Evaluation Mode)
-# Streamlit dashboard for Software Defect Prediction
+# app.py — Final Version (Prediction + Evaluation + Visualization Dashboard)
+# Software Defect Prediction using Random Forest Model (JM1 Dataset)
 
 import streamlit as st
 import pandas as pd
@@ -7,9 +7,12 @@ import numpy as np
 import joblib
 import os
 from io import BytesIO
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
 
 # -------------------------------
-# Streamlit Page Config
+# Page Configuration
 # -------------------------------
 st.set_page_config(page_title="Software Defect Prediction Dashboard", layout="wide")
 
@@ -17,14 +20,12 @@ st.set_page_config(page_title="Software Defect Prediction Dashboard", layout="wi
 # Helper Functions
 # -------------------------------
 def load_artifact(path):
-    """Safely load a model/preprocessor file."""
     if not os.path.exists(path):
-        st.error(f"Missing file: {path} — please ensure it exists in the app folder.")
+        st.error(f"Missing file: {path}")
         st.stop()
     return joblib.load(path)
 
 def preprocess_input(df, imputer, scaler):
-    """Convert to numeric, impute missing values, and scale features."""
     X = df.copy()
     for c in X.columns:
         X[c] = pd.to_numeric(X[c], errors="coerce")
@@ -33,11 +34,11 @@ def preprocess_input(df, imputer, scaler):
     return X_scaled, X
 
 # -------------------------------
-# Load Model and Preprocessors
+# Sidebar – Model Info
 # -------------------------------
 st.sidebar.title("Model Artifacts")
-st.sidebar.write("Ensure these files are present:")
-st.sidebar.write("- bug_predict_rf_tuned.joblib (model)")
+st.sidebar.write("Ensure these files exist in the app folder:")
+st.sidebar.write("- bug_predict_rf_tuned.joblib")
 st.sidebar.write("- imputer.joblib")
 st.sidebar.write("- scaler.joblib")
 st.sidebar.write("- (optional) feature_order.txt")
@@ -47,35 +48,35 @@ try:
     imputer = load_artifact("imputer.joblib")
     scaler = load_artifact("scaler.joblib")
 except Exception as e:
-    st.error(f"Error loading artifacts: {e}")
+    st.error(f"Error loading model artifacts: {e}")
     st.stop()
 
-# Determine expected feature count from scaler
+# Determine expected feature count
 try:
     expected_n_features = getattr(scaler, "n_features_in_", None)
 except Exception:
     expected_n_features = None
 
 # -------------------------------
-# Streamlit Header and Description
+# Main Header
 # -------------------------------
 st.title("Software Defect Prediction Dashboard")
 st.markdown(
     """
-    This dashboard predicts defect-prone software modules using a trained Random Forest model.
+    This dashboard predicts and evaluates defect-prone software modules using a trained Random Forest model.  
     You can upload:
-    - A CSV **without** the `defect` column for prediction.
-    - A CSV **with** the `defect` column for evaluation of model performance.
+    - A CSV **without** the `defect` column for prediction.  
+    - A CSV **with** the `defect` column for evaluation.
     """
 )
 
 uploaded_file = st.file_uploader("Upload software metrics CSV file", type=["csv"])
 
 # -------------------------------
-# Optional: Provide Sample Dataset
+# Optional Sample Dataset
 # -------------------------------
-with st.expander("Sample dataset and guidance"):
-    st.write("Ensure your CSV follows the same format as used during training.")
+with st.expander("Sample Dataset and Format Guide"):
+    st.write("Ensure your CSV uses the same structure as the JM1 dataset used for model training.")
     if os.path.exists("jm1.csv"):
         with open("jm1.csv", "rb") as fh:
             st.download_button("Download sample jm1.csv", fh, file_name="jm1_sample.csv")
@@ -83,31 +84,38 @@ with st.expander("Sample dataset and guidance"):
         st.info("No jm1.csv found locally — upload your own dataset.")
 
 # -------------------------------
-# Process Uploaded File
+# Process Uploaded CSV
 # -------------------------------
 if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file)
     except Exception as e:
-        st.error("Unable to read CSV. Please upload a valid comma-separated file.")
+        st.error("Unable to read CSV file. Please upload a valid file.")
         st.stop()
 
     st.subheader("Uploaded Data Preview")
     st.dataframe(df.head())
 
-    # Drop unnamed index columns
+    # --- Drop unnamed columns ---
     unnamed_cols = [c for c in df.columns if "unnamed" in c.lower()]
     if unnamed_cols:
         st.info(f"Dropping unnamed columns: {unnamed_cols}")
         df = df.drop(columns=unnamed_cols)
 
-    # Check for 'defect' column and ask how to proceed
+    # --- Optional correlation heatmap ---
+    with st.expander("Show Correlation Heatmap"):
+        corr = df.corr()
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(corr, cmap="vlag", center=0, annot=False, ax=ax)
+        st.pyplot(fig)
+
+    # --- Label handling ---
     has_label = "defect" in df.columns
     eval_mode = False
     if has_label:
         choice = st.radio(
             "Detected 'defect' column. Choose action:",
-            ("Evaluate model using provided labels", "Drop labels and only predict")
+            ("Evaluate model using provided labels", "Drop labels and only predict"),
         )
         if choice == "Evaluate model using provided labels":
             eval_mode = True
@@ -117,32 +125,31 @@ if uploaded_file is not None:
             st.warning("Dropping 'defect' column for prediction.")
             df = df.drop(columns=["defect"])
 
-    # Handle column order using feature_order.txt
+    # --- Handle column order using feature_order.txt ---
     expected = None
     if os.path.exists("feature_order.txt"):
         with open("feature_order.txt") as fh:
             expected = [l.strip() for l in fh if l.strip()]
-
     if expected:
         missing = [c for c in expected if c not in df.columns]
         if missing:
-            st.error(f"Uploaded file is missing expected columns: {missing}")
+            st.error(f"Uploaded file missing expected columns: {missing}")
             st.stop()
         df = df[expected]
     else:
         if expected_n_features and df.shape[1] != expected_n_features:
             st.error(
-                f"Uploaded data has {df.shape[1]} features, but the model expects {expected_n_features}. "
-                "Ensure correct features or include a feature_order.txt file."
+                f"Uploaded data has {df.shape[1]} features but model expects {expected_n_features}."
             )
             st.stop()
 
-    # Preprocess and Predict
+    # --- Preprocess & Predict ---
     X_scaled, X_original = preprocess_input(df, imputer, scaler)
-    preds = model.predict(X_scaled)
-    probs = model.predict_proba(X_scaled)[:, 1] if hasattr(model, "predict_proba") else np.zeros(len(preds))
+    probs = model.predict_proba(X_scaled)[:, 1]
+    threshold = st.sidebar.slider("Prediction Threshold", 0.0, 1.0, 0.5, 0.01)
+    preds = (probs >= threshold).astype(int)
 
-    # Results table
+    # --- Results ---
     results = X_original.copy()
     results["Predicted_Defect"] = preds
     results["Defect_Probability"] = np.round(probs, 4)
@@ -150,25 +157,31 @@ if uploaded_file is not None:
     st.subheader("Prediction Results (First 20 Rows)")
     st.dataframe(results.head(20))
 
-    # Download option
-    csv = results.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download predictions (CSV)",
-        data=csv,
-        file_name="predictions.csv",
-        mime="text/csv"
-    )
-
-    # Summary and charts
+    # --- Summary statistics ---
     st.subheader("Summary Statistics")
     defect_rate = results["Predicted_Defect"].mean() * 100
     st.metric("Predicted Defect Rate", f"{defect_rate:.2f}%")
-
     counts = results["Predicted_Defect"].value_counts().sort_index()
     st.bar_chart(counts)
 
-    st.subheader("Top Predicted Defects (High Risk Modules)")
-    st.dataframe(results.sort_values("Defect_Probability", ascending=False).head(10))
+    # --- Feature Importance ---
+    try:
+        importances = model.feature_importances_
+        feat_names = X_original.columns.tolist()
+        fi = pd.Series(importances, index=feat_names).sort_values(ascending=False)
+        st.subheader("Feature Importances (Random Forest)")
+        st.bar_chart(fi.head(20))
+    except Exception as e:
+        st.info("Feature importance not available: " + str(e))
+
+    # --- Top High-Risk Modules ---
+    st.subheader("Top Predicted Defects (High-Risk Modules)")
+    k = st.slider("Top K modules to display", 5, 50, 10, 1)
+    topk = results.sort_values("Defect_Probability", ascending=False).head(k)
+    st.dataframe(topk)
+
+    csv = results.to_csv(index=False).encode("utf-8")
+    st.download_button("Download predictions (CSV)", data=csv, file_name="predictions.csv", mime="text/csv")
 
     # -------------------------------
     # Evaluation Mode
@@ -179,9 +192,8 @@ if uploaded_file is not None:
             f1_score, confusion_matrix, roc_auc_score,
             roc_curve, precision_recall_curve
         )
-        import matplotlib.pyplot as plt
 
-        st.subheader("Model Evaluation (using provided 'defect' labels)")
+        st.subheader("Model Evaluation (Using Provided Labels)")
 
         acc = accuracy_score(y_true, preds)
         prec = precision_score(y_true, preds, zero_division=0)
@@ -195,37 +207,43 @@ if uploaded_file is not None:
         st.write(f"**Accuracy:** {acc:.4f}")
         st.write(f"**Precision:** {prec:.4f}")
         st.write(f"**Recall:** {rec:.4f}")
-        st.write(f"**F1-Score:** {f1:.4f}")
+        st.write(f"**F1-score:** {f1:.4f}")
         if roc_auc:
-            st.write(f"**ROC-AUC:** {roc_auc:.4f}")
+            st.write(f"**ROC AUC:** {roc_auc:.4f}")
 
-        # Confusion Matrix
+        # Confusion Matrix Heatmap
         cm = confusion_matrix(y_true, preds)
-        st.write("Confusion Matrix (rows=True labels, cols=Predictions):")
-        st.write(cm)
+        fig, ax = plt.subplots(figsize=(4, 3))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        st.pyplot(fig)
 
         # ROC & Precision-Recall Curves
-        try:
-            fpr, tpr, _ = roc_curve(y_true, probs)
-            pr_prec, pr_rec, _ = precision_recall_curve(y_true, probs)
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        pr_prec, pr_rec, _ = precision_recall_curve(y_true, probs)
 
-            fig1, ax1 = plt.subplots()
-            ax1.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}" if roc_auc else "")
-            ax1.plot([0,1],[0,1],'k--')
-            ax1.set_xlabel("False Positive Rate")
-            ax1.set_ylabel("True Positive Rate")
-            ax1.set_title("ROC Curve")
-            ax1.legend()
-            st.pyplot(fig1)
+        fig1, ax1 = plt.subplots()
+        ax1.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}" if roc_auc else "")
+        ax1.plot([0, 1], [0, 1], "k--")
+        ax1.set_xlabel("False Positive Rate")
+        ax1.set_ylabel("True Positive Rate")
+        ax1.set_title("ROC Curve")
+        ax1.legend()
+        st.pyplot(fig1)
 
-            fig2, ax2 = plt.subplots()
-            ax2.plot(pr_rec, pr_prec)
-            ax2.set_xlabel("Recall")
-            ax2.set_ylabel("Precision")
-            ax2.set_title("Precision-Recall Curve")
-            st.pyplot(fig2)
-        except Exception as e:
-            st.info("Unable to compute ROC/PR curves: " + str(e))
+        fig2, ax2 = plt.subplots()
+        ax2.plot(pr_rec, pr_prec)
+        ax2.set_xlabel("Recall")
+        ax2.set_ylabel("Precision")
+        ax2.set_title("Precision-Recall Curve")
+        st.pyplot(fig2)
+
+    # --- Optional SHAP Visualization ---
+    if os.path.exists("shap_summary.png"):
+        st.subheader("SHAP Summary (Global Feature Impact)")
+        img = Image.open("shap_summary.png")
+        st.image(img, use_column_width=True)
 
 else:
     st.info("Awaiting CSV upload... Please upload your dataset to begin.")
@@ -238,8 +256,9 @@ st.markdown(
     """
     **Notes:**
     - You can upload CSV files with or without the `defect` column.  
-    - If included, choose whether to evaluate model accuracy or only predict.  
-    - If column order differs, include `feature_order.txt` in this folder.  
-    - This dashboard supports both local and Streamlit Cloud deployment.  
+    - Use the threshold slider to adjust defect classification sensitivity.  
+    - If a `feature_order.txt` exists, it ensures consistent feature alignment.  
+    - Evaluation mode shows confusion matrix, ROC, and PR curves.  
+    - SHAP summary plot can be added as `shap_summary.png` for explainability.  
     """
 )
